@@ -1,5 +1,3 @@
-# cj_challenge
-
 ## Route Optimization
 
 ### **데이터**
