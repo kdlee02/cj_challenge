@@ -3,6 +3,7 @@ import pandas as pd
 import polars as pl
 import numpy as np
 import math
+import os
 from collections import defaultdict
 from pyvrp import Model
 from pyvrp.stop import MaxRuntime
@@ -11,8 +12,15 @@ from py3dbp import Packer, Bin, Item
 
 def load_and_process_data():
     """데이터 로드 및 전처리"""
+    import os
+    
+    # 현재 스크립트의 디렉토리 기준으로 상대경로 설정
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(script_dir, '..', 'dataset', 'Data_Set.json')
+    txt_path = os.path.join(script_dir, '..', 'dataset', 'distance-data.txt')
+    
     # JSON 파일 로드
-    with open('data.json', 'r', encoding='utf-8') as f:
+    with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
     # 데이터프레임 생성
@@ -66,7 +74,7 @@ def load_and_process_data():
     df = pl.DataFrame(rows)
     
     # 거리 데이터 로드
-    matrix = pl.read_csv('distance-data.txt', separator='\t')
+    matrix = pl.read_csv(txt_path, separator='\t')
     
     return df, matrix
 
