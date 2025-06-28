@@ -1,306 +1,402 @@
+"""
+CJ 대한통운 미래기술 챌린지
+경로 최적화 + 적재 최적화 통합 솔루션
+"""
+
 import json
 import pandas as pd
 import polars as pl
 import numpy as np
 import math
-import os
-from collections import defaultdict
+import openpyxl
 from pyvrp import Model
 from pyvrp.stop import MaxRuntime
 from pyproj import Transformer
 from py3dbp import Packer, Bin, Item
+import warnings
+warnings.filterwarnings('ignore')
 
-def load_and_process_data():
-    """데이터 로드 및 전처리"""
-    import os
-    
-    # 현재 스크립트의 디렉토리 기준으로 상대경로 설정
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    json_path = os.path.join(script_dir, '..', 'dataset', 'Data_Set.json')
-    txt_path = os.path.join(script_dir, '..', 'dataset', 'distance-data.txt')
-    
-    # JSON 파일 로드
-    with open(json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    # 데이터프레임 생성
-    rows = []
-    
-    # Depot 추가
-    depot = data['depot']
-    rows.append({
-        'Vehicle_ID': 0,
-        'Route_Order': 0,
-        'Destination': 'Depot',
-        'Order_Number': None,
-        'Box_ID': None,
-        'Stacking_Order': None,
-        'Lower_Left_X': None,
-        'Lower_Left_Y': None,
-        'Lower_Left_Z': None,
-        'Longitude': depot['location']['longitude'],
-        'Latitude': depot['location']['latitude'],
-        'Box_Width': 0,
-        'Box_Length': 0,
-        'Box_Height': 0,
-        'Volume': 0
-    })
-    
-    # 주문 정보 추가
-    for order in data['orders']:
-        # 해당 목적지 찾기
-        dest_info = next(d for d in data['destinations'] if d['destination_id'] == order['destination'])
-        
-        volume = order['dimension']['width'] * order['dimension']['length'] * order['dimension']['height']
-        
-        rows.append({
-            'Vehicle_ID': 0,
-            'Route_Order': 0,
-            'Destination': order['destination'],
-            'Order_Number': order['order_number'],
-            'Box_ID': order['box_id'],
-            'Stacking_Order': 0,
-            'Lower_Left_X': 0,
-            'Lower_Left_Y': 0,
-            'Lower_Left_Z': 0,
-            'Longitude': dest_info['location']['longitude'],
-            'Latitude': dest_info['location']['latitude'],
-            'Box_Width': order['dimension']['width'],
-            'Box_Length': order['dimension']['length'],
-            'Box_Height': order['dimension']['height'],
-            'Volume': volume
-        })
-    
-    df = pl.DataFrame(rows)
-    
-    # 거리 데이터 로드
-    matrix = pl.read_csv(txt_path, separator='\t')
-    
-    return df, matrix
 
-def optimize_routes(df, matrix):
-    """경로 최적화"""
-    truck_capacity = 160 * 280 * 180
+class CJOptimizer:
+    """CJ 대한통운 경로 및 적재 최적화 클래스"""
     
-    # 좌표 변환
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    coords = [transformer.transform(lon, lat) for lon, lat in zip(df['Longitude'], df['Latitude'])]
-    
-    # 차량 수 계산
-    num_vehicles = math.ceil(df.select('Volume').sum()[0, 0] / truck_capacity)
-    
-    # 모델 생성
-    m = Model()
-    m.add_vehicle_type(num_available=num_vehicles+2, capacity=int(truck_capacity*0.7), 
-                      fixed_cost=150000, unit_distance_cost=500)
-    
-    # 인덱스 매핑
-    index_to_order_number = []
-    index_to_location_name = []
-    
-    # Depot 추가
-    depot = m.add_depot(x=coords[0][0], y=coords[0][1], name="Depot")
-    index_to_order_number.append(df['Order_Number'][0])
-    index_to_location_name.append("Depot")
-    
-    # 고객 추가
-    for idx, row in enumerate(df.iter_rows(named=True)):
-        if idx != 0:
-            xs = coords[idx][0]
-            ys = coords[idx][1]
-            deliver = row['Volume']
-            m.add_client(
-                x=xs,
-                y=ys,
-                delivery=deliver,
-                name=row['Destination']
-            )
-            index_to_order_number.append(row['Order_Number'])
-            index_to_location_name.append(row['Destination'])
-    
-    # 엣지 추가
-    for frm in m.locations:
-        for to in m.locations:
-            origin = frm.name
-            destination = to.name
-            if origin != destination:
-                distance_result = matrix.filter((pl.col('ORIGIN') == origin) & (pl.col('DESTINATION') == destination))
-                if distance_result.height > 0:
-                    distance = distance_result.select('DISTANCE_METER').to_series().item() / 1000
-                else:
-                    # 거리 정보가 없으면 유클리드 거리 사용
-                    frm_coords = next(coord for i, coord in enumerate(coords) if index_to_location_name[i] == origin)
-                    to_coords = next(coord for i, coord in enumerate(coords) if index_to_location_name[i] == destination)
-                    distance = np.sqrt((frm_coords[0] - to_coords[0])**2 + (frm_coords[1] - to_coords[1])**2) / 1000
-                m.add_edge(frm, to, distance=distance)
-            else:
-                m.add_edge(frm, to, distance=0)
-    
-    # 최적화 실행
-    res = m.solve(stop=MaxRuntime(300), display=False)
-    
-    # 결과 처리
-    routes = [list(route) for route in res.best.routes()]
-    new_df = df.clear()
-    
-    for i in range(len(routes)):
-        order_map = {order_num: idx for idx, order_num in enumerate(routes[i])}
+    def __init__(self):
+        # 트럭 규격 (width x height x depth)
+        self.truck_dimensions = (160, 280, 180)
+        self.truck_capacity = 160 * 280 * 180
+        self.transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         
-        filtered_df = (df
-            .filter(pl.col('Order_Number').is_in(routes[i]))
-            .with_columns(
-                pl.col('Order_Number').map_elements(
-                    lambda x: order_map.get(x, float('inf')), 
-                    return_dtype=pl.Int64
-                ).alias('route_order')
-            )
-            .sort('route_order')
-            .drop('route_order')
+    def load_data(self, data_file, distance_file):
+        """데이터 파일 로드"""
+        print("📂 데이터 로딩 중...")
+
+        with open(data_file, 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+
+        depot = json_data["depot"]
+        destinations = json_data["destinations"]
+        orders = json_data["orders"]
+
+        # 1️⃣ Depot Row
+        depot_row = {
+            "Vehicle_ID": 0,
+            "Route_Order": 0,
+            "Destination": depot["destination"],
+            "Order_Number": "DEPOT",
+            "Box_ID": None,
+            "Stacking_Order": None,
+            "Lower_Left_X": 0,
+            "Lower_Left_Y": 0,
+            "Lower_Left_Z": 0,
+            "Longitude": depot["location"]["longitude"],
+            "Latitude": depot["location"]["latitude"],
+            "Box_Width": 0,
+            "Box_Length": 0,
+            "Box_Height": 0,
+            "Volume": 0
+        }
+        rows = [depot_row]
+
+        # 2️⃣ destination_id → 좌표 매핑
+        dest_coords = {
+            d["destination_id"]: (d["location"]["longitude"], d["location"]["latitude"])
+            for d in destinations
+        }
+
+        # 3️⃣ Orders Rows
+        for order in orders:
+            dest_id = order["destination"]
+            longitude, latitude = dest_coords.get(dest_id, (None, None))
+            width = order["dimension"]["width"]
+            length = order["dimension"]["length"]
+            height = order["dimension"]["height"]
+
+            row = {
+                "Vehicle_ID": 0,
+                "Route_Order": 0,
+                "Destination": dest_id,
+                "Order_Number": order["order_number"],
+                "Box_ID": order["box_id"],
+                "Stacking_Order": 0,
+                "Lower_Left_X": 0,
+                "Lower_Left_Y": 0,
+                "Lower_Left_Z": 0,
+                "Longitude": longitude,
+                "Latitude": latitude,
+                "Box_Width": width,
+                "Box_Length": length,
+                "Box_Height": height,
+                "Volume": width * length * height
+            }
+            rows.append(row)
+
+        # 4️⃣ DataFrame 생성
+        self.df = pl.DataFrame(rows)
+
+        # 5️⃣ 거리 매트릭스
+        self.matrix = pl.read_csv(distance_file, separator='\t')
+
+        print(f"✅ 주문 데이터: {len(self.df)}건")
+        print(f"✅ 거리 매트릭스: {len(self.matrix)}건")
+
+    def route_optimization(self):
+        """경로 최적화 수행"""
+        print("\n🚛 경로 최적화 시작...")
+        
+        # 좌표 변환 (WGS84 -> Web Mercator)
+        coords = [
+            self.transformer.transform(lon, lat) 
+            for lon, lat in zip(self.df['Longitude'], self.df['Latitude'])
+        ]
+        
+        # 필요 차량 수 계산
+        total_volume = self.df.select('Volume').sum()[0, 0]
+        self.load_factor = 0.7
+        num_vehicles = math.ceil(total_volume / (self.truck_capacity * self.load_factor))
+
+        
+        print(f"📊 총 부피: {total_volume:,}")
+        print(f"🚛 필요 차량 수: {num_vehicles}")
+        
+        # PyVRP 모델 생성
+        m = Model()
+        m.add_vehicle_type(
+            num_available=num_vehicles + 2, 
+            capacity=int(self.truck_capacity * 0.7), 
+            fixed_cost=150000, 
+            unit_distance_cost=500
         )
         
-        depot_row = pl.DataFrame({
-            col: [None] if col != 'Destination' else ['Depot'] 
-            for col in filtered_df.columns
-        }).cast(dict(zip(filtered_df.columns, filtered_df.dtypes)))
+        # 인덱스 매핑 생성
+        self.index_to_order_number = []
+        self.index_to_location_name = []
         
-        result = pl.concat([
-            depot_row,           
-            filtered_df,       
-            depot_row          
+        # 창고(Depot) 추가
+        depot = m.add_depot(x=coords[0][0], y=coords[0][1], name="Depot")
+        self.index_to_order_number.append(self.df['Order_Number'][0])
+        self.index_to_location_name.append("Depot")
+        
+        # 배송지 추가
+        for idx, row in enumerate(self.df.iter_rows(named=True)):
+            if idx != 0:  # 첫 번째는 창고이므로 제외
+                m.add_client(
+                    x=coords[idx][0],
+                    y=coords[idx][1],
+                    delivery=row['Volume'],
+                    name=row['Destination']
+                )
+                self.index_to_order_number.append(row['Order_Number'])
+                self.index_to_location_name.append(row['Destination'])
+        
+        # 거리 매트릭스 추가
+        for frm in m.locations:
+            for to in m.locations:
+                origin = frm.name
+                destination = to.name
+                if origin != destination:
+                    distance_row = self.matrix.filter(
+                        (pl.col('ORIGIN') == origin) & 
+                        (pl.col('DESTINATION') == destination)
+                    )
+                    if len(distance_row) > 0:
+                        distance = distance_row.select('DISTANCE_METER').to_series().item() / 1000
+                    else:
+                        # 거리 데이터가 없는 경우 유클리드 거리 사용
+                        distance = 10  # 기본값
+                    m.add_edge(frm, to, distance=distance)
+                else:
+                    m.add_edge(frm, to, distance=0)
+        
+        # 경로 최적화 실행
+        print("🔄 경로 최적화 실행 중... (최대 60초)")
+        res = m.solve(stop=MaxRuntime(60), display=False)
+        
+        # 결과 처리
+        routes = [list(route) for route in res.best.routes()]
+        self.process_routes(routes)
+        
+        print(f"✅ 경로 최적화 완료 - {len(routes)}개 경로 생성")
+        
+    def process_routes(self, routes):
+        """경로 결과 처리"""
+        new_df = self.df.clear()
+        
+        for vehicle_id, route in enumerate(routes):
+            print(f"▶ Vehicle {vehicle_id} route: {route}")
+            if not route:
+                continue
+            
+            route_str = [str(x) for x in route]
+            order_map = {s: idx for idx, s in enumerate(route_str)}
+
+            print(f"▶ order_map: {order_map}")
+            
+            # Depot 제외
+            filtered_df = (
+                self.df
+                .filter(
+                    pl.col('Order_Number').is_in(route_str)
+                )
+                .with_columns(
+                    pl.col('Order_Number').map_elements(
+                        lambda x: order_map.get(x, float('inf')),
+                        return_dtype=pl.Int64
+                    ).alias('route_order')
+                )
+                .sort('route_order')
+                .drop('route_order')
+            )
+            
+            # 창고 행 생성
+            depot_row = pl.DataFrame({
+                col: [None] if col != 'Destination' else ['Depot'] 
+                for col in filtered_df.columns
+            }).cast(dict(zip(filtered_df.columns, filtered_df.dtypes)))
+            
+            # 창고 -> 배송지들 -> 창고 순서로 결합
+            result = pl.concat([depot_row, filtered_df, depot_row])
+            
+            # Route_Order와 Vehicle_ID 추가
+            result = result.with_columns([
+                (pl.int_range(pl.len()) + 1).alias('Route_Order'),
+                pl.lit(vehicle_id).alias('Vehicle_ID').cast(pl.Int64)
+            ])
+            
+            new_df = pl.concat([new_df, result])
+        
+        self.route_df = new_df
+        
+    def load_optimization(self):
+        """적재 최적화 수행"""
+        print("\n📦 적재 최적화 시작...")
+        
+        all_results = []
+        
+        # 각 차량별로 적재 최적화 수행
+        vehicle_ids = self.route_df.select('Vehicle_ID').unique().to_series().to_list()
+        
+        for vehicle_id in vehicle_ids:
+            if vehicle_id is None:
+                continue
+                
+            print(f"🚛 Vehicle {vehicle_id} 적재 최적화...")
+            
+            # 해당 차량의 배송지만 필터링 (창고 제외)
+            vehicle_items = self.route_df.filter(
+                (pl.col('Vehicle_ID') == vehicle_id) & 
+                (pl.col('Destination') != 'Depot')
+            )
+            
+            if len(vehicle_items) == 0:
+                continue
+            
+            # Stacking_Order는 route_order 역순으로 설정
+            vehicle_items = vehicle_items.with_columns(
+                pl.int_range(vehicle_items.height, 0, -1).alias('Stacking_Order')
+            )
+            
+            # 3D 빈 패킹 수행
+            packer = Packer()
+            
+            # 트럭 빈 생성 (width, height, depth, max_weight, max_items)
+            # 트럭 빈 생성
+            truck = Bin(
+                partno='Truck',
+                WHD=(self.truck_dimensions[0], self.truck_dimensions[1], self.truck_dimensions[2]),
+                max_weight=999999,
+                put_type=1
+            )
+            packer.addBin(truck)
+
+            # 아이템 추가
+            for row in vehicle_items.iter_rows(named=True):
+                item = Item(
+                    partno=row["Box_ID"],
+                    name=row["Box_ID"],
+                    typeof='cube',
+                    WHD=(
+                        int(row["Box_Width"]),
+                        int(row["Box_Height"]),
+                        int(row["Box_Length"])
+                    ),
+                    weight=1,
+                    level=row["Stacking_Order"],
+                    updown=True,
+                    loadbear=999999,
+                    color='#FFCC00'
+                )
+                packer.addItem(item)
+
+            # 패킹 실행
+            packer.pack(
+                fix_point=True,
+                check_stable=False,
+                bigger_first=False
+            )
+            
+            # 결과 수집
+            for item in packer.bins[0].items:
+                all_results.append({
+                    "Vehicle_ID": vehicle_id,
+                    "Box_ID": item.name,
+                    "Lower_Left_X": item.position[0],
+                    "Lower_Left_Y": item.position[2],  # Y와 Z 좌표 교환
+                    "Lower_Left_Z": item.position[1],
+                    "Box_Width": item.width,
+                    "Box_Length": item.depth,
+                    "Box_Height": item.height
+                })
+        
+        # 적재 결과 DataFrame 생성
+        self.load_df = pl.DataFrame(all_results).with_columns([
+            pl.col("Lower_Left_X").cast(pl.Float64),
+            pl.col("Lower_Left_Y").cast(pl.Float64),
+            pl.col("Lower_Left_Z").cast(pl.Float64),
+            pl.col("Box_Width").cast(pl.Float64),
+            pl.col("Box_Length").cast(pl.Float64),
+            pl.col("Box_Height").cast(pl.Float64),
         ])
         
-        result = result.with_columns(
-            (pl.int_range(pl.len()) + 1).alias('Route_Order')
-        )
+        print(f"✅ 적재 최적화 완료 - {len(self.load_df)}개 박스 배치")
         
-        result = result.with_columns(
-            pl.lit(i).alias('Vehicle_ID').cast(pl.Int64)
-        )
-        new_df = pl.concat([new_df, result])
-    
-    return new_df
-
-def create_bin(df, vehicle_number):
-    """차량별 적재 최적화"""
-    rows = df.filter(pl.col('Vehicle_ID') == vehicle_number).filter(pl.col('Destination') != 'Depot')
-    rows = rows.with_columns(
-        pl.int_range(rows.height, 0, -1).alias('rank')
-    )
-    
-    packer = Packer()
-    
-    truck = Bin(
-        partno='Truck',
-        WHD=(160, 180, 280),
-        max_weight=999999,
-        put_type=1        
-    )
-    packer.addBin(truck)  
-    
-    for row in rows.iter_rows(named=True):
-        item = Item(
-            partno=row["Box_ID"],
-            name=row["Box_ID"],
-            typeof='cube',
-            WHD=(
-                int(row["Box_Width"]),
-                int(row["Box_Height"]),
-                int(row["Box_Length"])
-            ),
-            weight=1,
-            level=row["rank"],      
-            updown=True,
-            loadbear=999999,
-            color='#FFCC00'
-        )
-        packer.addItem(item)  
-    
-    packer.pack(
-        fix_point=True,
-        check_stable=False,
-        bigger_first=False 
-    )
-    return truck, packer
-
-def optimize_loading(df):
-    """적재 최적화"""
-    # Stacking_Order 계산 (vehicle별로 route_order 역순)
-    df = df.with_columns(
-        pl.col('Route_Order').max().over('Vehicle_ID').alias('max_route_order')
-    ).with_columns(
-        (pl.col('max_route_order') - pl.col('Route_Order') + 1).alias('Stacking_Order')
-    ).drop('max_route_order')
-    
-    packing = defaultdict()
-    unfitted = []
-    
-    max_vehicle_id = df.select(['Vehicle_ID']).max().item()
-    
-    for x in range(max_vehicle_id + 1):
-        truck, packer = create_bin(df, x)
-        unfitted.append(len(truck.unfitted_items))
-        packing[x] = packer
-    
-    if sum(unfitted) == 0:
-        print("All items fitted")
-    else:
-        print(f"Unfitted items: {sum(unfitted)}")
-    
-    # 적재 결과 데이터프레임 생성
-    packing_df = pl.DataFrame()
-    for i in range(max_vehicle_id + 1):
-        records = []
-        for item in packing[i].bins[0].items:
-            records.append({
-                "Box_ID": item.name,
-                "Lower_Left_X": item.position[0],
-                "Lower_Left_Y": item.position[2], 
-                "Lower_Left_Z": item.position[1],
-                "Box_Width": item.width,
-                "Box_Length": item.depth,
-                "Box_Height": item.height
-            })
+    def save_results(self, output_file='Result.xlsx'):
+        """결과를 Excel 파일로 저장"""
+        print(f"\n💾 결과 저장 중: {output_file}")
         
-        if records:
-            vehicle_packing = pl.DataFrame(records)
-            vehicle_packing = vehicle_packing.with_columns([
-                pl.col("Lower_Left_X").cast(pl.Float64),
-                pl.col("Lower_Left_Y").cast(pl.Float64),
-                pl.col("Lower_Left_Z").cast(pl.Float64),
-                pl.col("Box_Width").cast(pl.Float64),
-                pl.col("Box_Length").cast(pl.Float64),
-                pl.col("Box_Height").cast(pl.Float64),
-            ])
-            packing_df = packing_df.vstack(vehicle_packing)
-    
-    # 원본 데이터와 적재 결과 조인
-    joined = df.join(packing_df, on='Box_ID', how='left', suffix='_packing')
-    
-    # 좌표 컬럼 업데이트
-    cols_to_replace = ['Lower_Left_X', 'Lower_Left_Y', 'Lower_Left_Z']
-    
-    final_df = joined.with_columns([
-        pl.coalesce([pl.col(f"{col}_packing"), pl.col(col)]).alias(col)
-        for col in cols_to_replace
-    ]).select([col for col in joined.columns if not col.endswith('_packing')])
-    
-    return final_df
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            # 경로 최적화 결과
+            route_pandas = self.route_df.to_pandas()
+            route_pandas.to_excel(writer, sheet_name='Route_Optimization', index=False)
+            
+            # 적재 최적화 결과
+            load_pandas = self.load_df.to_pandas()
+            load_pandas.to_excel(writer, sheet_name='Load_Optimization', index=False)
+            
+            # 요약 정보
+            summary_data = {
+                'Metric': [
+                    'Total Orders', 
+                    'Total Vehicles', 
+                    'Total Volume', 
+                    'Average Load per Vehicle',
+                    'Optimization Method'
+                ],
+                'Value': [
+                    len(self.df) - 1,  # 창고 제외
+                    len(self.route_df.select('Vehicle_ID').unique()) - 1,  # None 제외
+                    self.df.select('Volume').sum()[0, 0],
+                    self.df.select('Volume').sum()[0, 0] / (len(self.route_df.select('Vehicle_ID').unique()) - 1),
+                    'PyVRP + Py3DBP'
+                ]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        print(f"✅ 결과 저장 완료: {output_file}")
+        
+    def run_optimization(self, data_file='data.json', distance_file='distance-data.txt', output_file='Result.xlsx'):
+        """전체 최적화 프로세스 실행"""
+        print("🚀 CJ 대한통운 경로 및 적재 최적화 시작")
+        print("=" * 50)
+        
+        try:
+            # 1. 데이터 로드
+            self.load_data(data_file, distance_file)
+            
+            # 2. 경로 최적화
+            self.route_optimization()
+            
+            # 3. 적재 최적화
+            self.load_optimization()
+            
+            # 4. 결과 저장
+            self.save_results(output_file)
+            
+            print("\n" + "=" * 50)
+            print("🎉 최적화 완료!")
+            print(f"📊 총 {len(self.route_df.select('Vehicle_ID').unique()) - 1}대 차량")
+            print(f"📦 총 {len(self.load_df)}개 박스 최적 배치")
+            print(f"📁 결과 파일: {output_file}")
+            print("=== self.route_df ===")
+            print(self.route_df)
+
+            print("=== self.load_df ===")
+            print(self.load_df)
+            
+        except Exception as e:
+            print(f"❌ 오류 발생: {str(e)}")
+            raise
+
 
 def main():
-    """메인 함수"""
-    print("데이터 로드 중...")
-    df, matrix = load_and_process_data()
-    
-    print("경로 최적화 중...")
-    optimized_routes_df = optimize_routes(df, matrix)
-    
-    print("적재 최적화 중...")
-    final_df = optimize_loading(optimized_routes_df)
-    
-    print("결과 저장 중...")
-    final_df.write_excel('Result.xlsx')
-    
-    print("최적화 완료! Result.xlsx 파일이 생성되었습니다.")
+    """메인 실행 함수"""
+    optimizer = CJOptimizer()
+    optimizer.run_optimization(
+        data_file=r"C:\Users\Grace\Desktop\2025\프로젝트\미래기술챌린지\cj_challenge-2\main\data.json",
+        distance_file=r"C:\Users\Grace\Desktop\2025\프로젝트\미래기술챌린지\cj_challenge-2\main\distance-data.txt",
+        output_file='Result.xlsx'
+    )
+
 
 if __name__ == "__main__":
     main()
