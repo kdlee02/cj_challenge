@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 박스 스택킹 시각화</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+        }
+        
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            min-width: 320px;
+        }
+        
+        #fileInputWrapper {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 15px;
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            background: #f8f9ff;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        #fileInputWrapper:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+        
+        #fileInput {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+        }
+        
+        .control-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #333;
+            font-size: 14px;
+        }
+        
+        button {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 8px;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+            margin: 10px 0;
+        }
+        
+        #info {
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        
+        #progress {
+            background: #e0e0e0;
+            border-radius: 10px;
+            height: 8px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        
+        #progressBar {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        
+        .stats {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .status-success {
+            color: #27ae60 !important;
+        }
+        
+        .status-error {
+            color: #e74c3c !important;
+        }
+        
+        .status-loading {
+            color: #f39c12 !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="controls">
+            <h3 style="margin-top: 0; color: #333; text-align: center;">📦 3D 박스 스택킹 시각화</h3>
+            
+            <div class="control-group">
+                <label>📁 Excel 파일 업로드 (Result.xlsx)</label>
+                <div id="fileInputWrapper">
+                    <input type="file" id="fileInput" accept=".xlsx,.xls">
+                </div>
+                <div id="fileStatus">파일을 선택해주세요</div>
+            </div>
+            
+            <div class="control-group">
+                <button id="startBtn" disabled>▶️ 스택킹 시작</button>
+                <button id="pauseBtn" disabled>⏸️ 일시정지</button>
+                <button id="resetBtn" disabled>🔄 리셋</button>
+            </div>
+            
+            <div class="control-group">
+                <label>⚡ 애니메이션 속도</label>
+                <input type="range" id="speedSlider" min="1" max="10" value="5">
+                <div class="stats">
+                    <span>느림</span>
+                    <span>빠름</span>
+                </div>
+            </div>
+            
+            <div id="progress">
+                <div id="progressBar"></div>
+            </div>
+            
+            <div id="info">
+                <div id="currentBox">Excel 파일을 업로드해주세요</div>
+                <div id="totalBoxes"></div>
+                <div id="position"></div>
+                <div id="stackingOrder"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, controls;
+        let boxes = [];
+        let boxData = [];
+        let currentIndex = 0;
+        let isAnimating = false;
+        let animationId;
+        let boxMeshes = [];
+        
+        // 색상 팔레트 (더 많은 색상 추가)
+        const colors = [
+            0xff6b6b, 0x4ecdc4, 0x45b7d1, 0x96ceb4, 0xfeca57,
+            0xff9ff3, 0x54a0ff, 0xee5a24, 0x009432, 0x0652dd,
+            0x9c88ff, 0xffa726, 0x26de81, 0x2bcbba, 0xeb3b5a,
+            0xa55eea, 0x26d0ce, 0xfd79a8, 0xfdcb6e, 0x6c5ce7,
+            0xff7675, 0x74b9ff, 0x00b894, 0xfdcb6e, 0xe17055
+        ];
+        
+        function init() {
+            // Scene 설정
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a0a);
+            
+            // Camera 설정
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+            camera.position.set(300, 400, 500);
+            camera.lookAt(0, 0, 0);
+            
+            // Renderer 설정
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('container').appendChild(renderer.domElement);
+            
+            // 조명 설정
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(200, 300, 200);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 0.1;
+            directionalLight.shadow.camera.far = 1000;
+            directionalLight.shadow.camera.left = -500;
+            directionalLight.shadow.camera.right = 500;
+            directionalLight.shadow.camera.top = 500;
+            directionalLight.shadow.camera.bottom = -500;
+            scene.add(directionalLight);
+            
+            // 바닥 생성 (더 큰 바닥)
+            const floorGeometry = new THREE.PlaneGeometry(1000, 1000);
+            const floorMaterial = new THREE.MeshLambertMaterial({ 
+                color: 0x333333,
+                transparent: true,
+                opacity: 0.8
+            });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+            
+            // 격자 추가 (좌표 참조용)
+            const gridHelper = new THREE.GridHelper(400, 20, 0x444444, 0x222222);
+            scene.add(gridHelper);
+            
+            // 축 표시
+            const axesHelper = new THREE.AxesHelper(100);
+            scene.add(axesHelper);
+            
+            // 마우스 컨트롤
+            setupMouseControls();
+            
+            // 이벤트 리스너
+            setupEventListeners();
+            
+            animate();
+        }
+        
+        function setupMouseControls() {
+            let mouseDown = false;
+            let mouseX = 0;
+            let mouseY = 0;
+            
+            document.addEventListener('mousedown', (event) => {
+                mouseDown = true;
+                mouseX = event.clientX;
+                mouseY = event.clientY;
+            });
+            
+            document.addEventListener('mouseup', () => {
+                mouseDown = false;
+            });
+            
+            document.addEventListener('mousemove', (event) => {
+                if (!mouseDown) return;
+                
+                const deltaX = event.clientX - mouseX;
+                const deltaY = event.clientY - mouseY;
+                
+                const spherical = new THREE.Spherical();
+                spherical.setFromVector3(camera.position);
+                
+                spherical.theta -= deltaX * 0.01;
+                spherical.phi += deltaY * 0.01;
+                spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+                
+                camera.position.setFromSpherical(spherical);
+                camera.lookAt(0, 0, 0);
+                
+                mouseX = event.clientX;
+                mouseY = event.clientY;
+            });
+            
+            // 줌 컨트롤
+            document.addEventListener('wheel', (event) => {
+                const distance = camera.position.length();
+                const newDistance = distance + event.deltaY * 0.5;
+                
+                camera.position.normalize().multiplyScalar(Math.max(100, Math.min(1000, newDistance)));
+                camera.lookAt(0, 0, 0);
+            });
+        }
+        
+        function setupEventListeners() {
+            document.getElementById('fileInput').addEventListener('change', handleFileUpload);
+            document.getElementById('startBtn').addEventListener('click', startAnimation);
+            document.getElementById('pauseBtn').addEventListener('click', pauseAnimation);
+            document.getElementById('resetBtn').addEventListener('click', resetAnimation);
+            
+            window.addEventListener('resize', onWindowResize);
+        }
+        
+        function updateFileStatus(message, type = 'normal') {
+            const statusElement = document.getElementById('fileStatus');
+            statusElement.textContent = message;
+            statusElement.className = type === 'success' ? 'status-success' : 
+                                     type === 'error' ? 'status-error' : 
+                                     type === 'loading' ? 'status-loading' : '';
+        }
+        
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            updateFileStatus('📄 파일 처리 중...', 'loading');
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    loadExcelData(data);
+                } catch (error) {
+                    updateFileStatus('❌ 파일 읽기 실패: ' + error.message, 'error');
+                    console.error('파일 읽기 오류:', error);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+        
+        function loadExcelData(fileData) {
+            try {
+                console.log('Excel 파일 분석 중...');
+                
+                const workbook = XLSX.read(fileData, {
+                    cellStyles: true,
+                    cellFormulas: true,
+                    cellDates: true,
+                    cellNF: true,
+                    sheetStubs: true
+                });
+                
+                const sheetName = workbook.SheetNames[0];
+                console.log('시트 이름:', sheetName);
+                
+                const worksheet = workbook.Sheets[sheetName];
+                const data = XLSX.utils.sheet_to_json(worksheet);
+                console.log('전체 데이터 행 수:', data.length);
+                
+                // 박스 데이터만 필터링 (Depot 제외)
+                boxData = data.filter(row => 
+                    row.Box_ID && 
+                    row.Destination !== 'Depot' &&
+                    row.Stacking_Order !== undefined && 
+                    row.Lower_Left_X !== undefined &&
+                    row.Lower_Left_Y !== undefined &&
+                    row.Lower_Left_Z !== undefined &&
+                    row.Box_Width !== undefined &&
+                    row.Box_Length !== undefined &&
+                    row.Box_Height !== undefined
+                ).sort((a, b) => a.Stacking_Order - b.Stacking_Order);
+                
+                console.log('필터링된 박스 데이터:', boxData.length, '개');
+                console.log('첫 3개 박스 예시:', boxData.slice(0, 3));
+                
+                if (boxData.length > 0) {
+                    // UI 활성화
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('resetBtn').disabled = false;
+                    
+                    // 정보 업데이트
+                    document.getElementById('totalBoxes').textContent = `📦 총 박스 수: ${boxData.length}개`;
+                    document.getElementById('currentBox').textContent = '✅ 파일 로드 완료! 시작 버튼을 눌러주세요';
+                    
+                    updateFileStatus(`✅ ${boxData.length}개 박스 로드 완료!`, 'success');
+                    
+                    // 박스 데이터 범위 표시
+                    const xRange = { 
+                        min: Math.min(...boxData.map(b => b.Lower_Left_X)), 
+                        max: Math.max(...boxData.map(b => b.Lower_Left_X + b.Box_Width)) 
+                    };
+                    const yRange = { 
+                        min: Math.min(...boxData.map(b => b.Lower_Left_Y)), 
+                        max: Math.max(...boxData.map(b => b.Lower_Left_Y + b.Box_Length)) 
+                    };
+                    const zRange = { 
+                        min: Math.min(...boxData.map(b => b.Lower_Left_Z)), 
+                        max: Math.max(...boxData.map(b => b.Lower_Left_Z + b.Box_Height)) 
+                    };
+                    
+                    document.getElementById('position').textContent = 
+                        `📏 범위 - X: ${xRange.min}~${xRange.max}, Y: ${yRange.min}~${yRange.max}, Z: ${zRange.min}~${zRange.max}`;
+                    
+                } else {
+                    updateFileStatus('❌ 유효한 박스 데이터가 없습니다', 'error');
+                    document.getElementById('currentBox').textContent = '유효한 박스 데이터를 찾을 수 없습니다';
+                }
+                
+            } catch (error) {
+                console.error('Excel 파일 처리 실패:', error);
+                updateFileStatus('❌ Excel 파일 처리 실패: ' + error.message, 'error');
+                document.getElementById('currentBox').textContent = `파일 처리 실패: ${error.message}`;
+            }
+        }
+        
+        function createBox(boxInfo, index) {
+            const geometry = new THREE.BoxGeometry(
+                boxInfo.Box_Width, 
+                boxInfo.Box_Height, 
+                boxInfo.Box_Length
+            );
+            
+            const color = colors[index % colors.length];
+            const material = new THREE.MeshLambertMaterial({ 
+                color: color,
+                transparent: true,
+                opacity: 0.85
+            });
+            
+            const box = new THREE.Mesh(geometry, material);
+            
+            // 위치 설정 (Lower_Left 좌표를 중심점으로 변환)
+            box.position.set(
+                boxInfo.Lower_Left_X + boxInfo.Box_Width / 2,
+                boxInfo.Lower_Left_Z + boxInfo.Box_Height / 2,
+                boxInfo.Lower_Left_Y + boxInfo.Box_Length / 2
+            );
+            
+            box.castShadow = true;
+            box.receiveShadow = true;
+            
+            // 박스 정보 저장
+            box.userData = boxInfo;
+            
+            // 박스 라벨 추가
+            const label = createTextLabel(boxInfo.Box_ID);
+            label.position.set(0, boxInfo.Box_Height / 2 + 5, 0);
+            box.add(label);
+            
+            return box;
+        }
+        
+        function createTextLabel(text) {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = 128;
+            canvas.height = 32;
+            
+            context.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            context.strokeStyle = '#333333';
+            context.lineWidth = 1;
+            context.strokeRect(0, 0, canvas.width, canvas.height);
+            context.fillStyle = '#000000';
+            context.font = 'bold 12px Arial';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText(text, canvas.width / 2, canvas.height / 2);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const material = new THREE.SpriteMaterial({map: texture});
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(20, 5, 1);
+            
+            return sprite;
+        }
+        
+        function startAnimation() {
+            if (boxData.length === 0) {
+                alert('박스 데이터가 없습니다. Excel 파일을 먼저 업로드해주세요.');
+                return;
+            }
+            
+            isAnimating = true;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('pauseBtn').disabled = false;
+            
+            animateBoxes();
+        }
+        
+        function pauseAnimation() {
+            isAnimating = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('pauseBtn').disabled = true;
+            
+            if (animationId) {
+                clearTimeout(animationId);
+            }
+        }
+        
+        function resetAnimation() {
+            isAnimating = false;
+            currentIndex = 0;
+            
+            // 모든 박스 제거
+            boxMeshes.forEach(box => scene.remove(box));
+            boxMeshes = [];
+            
+            document.getElementById('startBtn').disabled = boxData.length === 0;
+            document.getElementById('pauseBtn').disabled = true;
+            document.getElementById('progressBar').style.width = '0%';
+            
+            if (boxData.length > 0) {
+                document.getElementById('currentBox').textContent = '🔄 리셋 완료! 시작 버튼을 눌러주세요';
+                document.getElementById('stackingOrder').textContent = '';
+            }
+            
+            if (animationId) {
+                clearTimeout(animationId);
+            }
+        }
+        
+        function animateBoxes() {
+            if (!isAnimating || currentIndex >= boxData.length) {
+                if (currentIndex >= boxData.length) {
+                    document.getElementById('currentBox').textContent = '🎉 모든 박스 스택킹 완료!';
+                    document.getElementById('stackingOrder').textContent = '모든 작업이 완료되었습니다';
+                }
+                isAnimating = false;
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('pauseBtn').disabled = true;
+                return;
+            }
+            
+            const boxInfo = boxData[currentIndex];
+            const box = createBox(boxInfo, currentIndex);
+            
+            // 박스를 위에서 떨어뜨리는 애니메이션
+            const targetY = box.position.y;
+            box.position.y = targetY + 150;
+            
+            scene.add(box);
+            boxMeshes.push(box);
+            
+            // 애니메이션으로 박스 떨어뜨리기 (바운스 효과 추가)
+            let velocity = 0;
+            const gravity = 0.5;
+            const bounce = 0.7;
+            
+            const dropAnimation = () => {
+                velocity += gravity;
+                box.position.y -= velocity;
+                
+                if (box.position.y <= targetY) {
+                    box.position.y = targetY;
+                    velocity *= -bounce;
+                    
+                    if (Math.abs(velocity) < 0.1) {
+                        box.position.y = targetY;
+                        return;
+                    }
+                }
+                
+                if (box.position.y >= targetY - 1) {
+                    requestAnimationFrame(dropAnimation);
+                }
+            };
+            dropAnimation();
+            
+            // UI 업데이트
+            document.getElementById('currentBox').textContent = 
+                `📦 ${boxInfo.Box_ID} 스택킹 중... (${currentIndex + 1}/${boxData.length})`;
+            document.getElementById('position').textContent = 
+                `📍 위치: (${boxInfo.Lower_Left_X}, ${boxInfo.Lower_Left_Y}, ${boxInfo.Lower_Left_Z})`;
+            document.getElementById('stackingOrder').textContent = 
+                `🏗️ 스택 순서: ${boxInfo.Stacking_Order} | 목적지: ${boxInfo.Destination}`;
+            
+            const progress = ((currentIndex + 1) / boxData.length) * 100;
+            document.getElementById('progressBar').style.width = progress + '%';
+            
+            currentIndex++;
+            
+            // 속도 조절
+            const speed = document.getElementById('speedSlider').value;
+            const delay = 1100 - (speed * 100); // 100ms ~ 1000ms
+            
+            animationId = setTimeout(animateBoxes, delay);
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        // 초기화
+        init();
+    </script>
+</body>
+</html>
