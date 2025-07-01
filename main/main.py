@@ -148,21 +148,18 @@ class CJOptimizer:
                 self.index_to_order_number.append(row['Order_Number'])
                 self.index_to_location_name.append(row['Destination'])
         
+        distance_dict = {}
+        for row in self.matrix.iter_rows(named=True):
+            key = (row['ORIGIN'], row['DESTINATION'])
+            distance_dict[key] = row['DISTANCE_METER'] / 1000
+
         # 거리 매트릭스 추가
         for frm in m.locations:
             for to in m.locations:
                 origin = frm.name
                 destination = to.name
                 if origin != destination:
-                    distance_row = self.matrix.filter(
-                        (pl.col('ORIGIN') == origin) & 
-                        (pl.col('DESTINATION') == destination)
-                    )
-                    if len(distance_row) > 0:
-                        distance = distance_row.select('DISTANCE_METER').to_series().item() / 1000
-                    else:
-                        # 거리 데이터가 없는 경우 유클리드 거리 사용
-                        distance = 10  # 기본값
+                    distance = distance_dict.get((origin, destination))
                     m.add_edge(frm, to, distance=distance)
                 else:
                     m.add_edge(frm, to, distance=0)
@@ -392,8 +389,8 @@ def main():
     """메인 실행 함수"""
     optimizer = CJOptimizer()
     optimizer.run_optimization(
-        data_file=r"C:\Users\Grace\Desktop\2025\프로젝트\미래기술챌린지\cj_challenge-2\main\data.json",
-        distance_file=r"C:\Users\Grace\Desktop\2025\프로젝트\미래기술챌린지\cj_challenge-2\main\distance-data.txt",
+        data_file=r"cj_challenge/main/data.json",
+        distance_file=r"cj_challenge/main/distance-data.txt",
         output_file='Result.xlsx'
     )
 
