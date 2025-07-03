@@ -4,7 +4,6 @@ CJ 대한통운 미래기술 챌린지
 """
 
 import json
-import pandas as pd
 import polars as pl
 import numpy as np
 import math
@@ -575,7 +574,7 @@ class CJOptimizer:
     
     def __init__(self):
         # 트럭 규격 (width x height x depth)
-        self.truck_dimensions = (160, 280, 180)
+        self.truck_dimensions = (160, 270, 170)
         self.truck_capacity = 160 * 280 * 180
         self.transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         
@@ -649,7 +648,7 @@ class CJOptimizer:
         # 5️⃣ 거리 매트릭스
         self.matrix = pl.read_csv(distance_file, separator='\t')
 
-        print(f"✅ 주문 데이터: {len(self.df)}건")
+        print(f"✅ 주문 데이터: {len(self.df) - 1}건")
         print(f"✅ 거리 매트릭스: {len(self.matrix)}건")
 
     def route_optimization(self):
@@ -674,9 +673,9 @@ class CJOptimizer:
         # PyVRP 모델 생성
         m = Model()
         m.add_vehicle_type(
-            num_available=num_vehicles + 2, 
-            capacity=int(self.truck_capacity * 0.7), 
-            fixed_cost=150000, 
+            num_available=num_vehicles + 3, 
+            capacity=int(self.truck_capacity * 0.62), 
+            fixed_cost=150000,
             unit_distance_cost=500
         )
         
@@ -718,8 +717,9 @@ class CJOptimizer:
                     m.add_edge(frm, to, distance=0)
         
         # 경로 최적화 실행
-        print("🔄 경로 최적화 실행 중... (최대 300초)")
-        res = m.solve(stop=MaxRuntime(300), display=False)
+        print("🔄 경로 최적화 실행 중... (최대 900초)")
+        res = m.solve(stop=MaxRuntime(900), display=False)
+
         
         # 결과 처리
         routes = [list(route) for route in res.best.routes()]
@@ -812,7 +812,7 @@ class CJOptimizer:
             # 트럭 빈 생성
             truck = Bin(
                 partno='Truck',
-                WHD=(self.truck_dimensions[0], self.truck_dimensions[1], self.truck_dimensions[2]),
+                WHD=(160, 170, 270),
                 max_weight=999999,
                 put_type=1
             )
@@ -898,6 +898,14 @@ class CJOptimizer:
             .otherwise(None)
             .alias("Stacking_Order")
         ])
+
+        route_pandas = route_pandas.with_columns(
+            pl.col("Lower_Left_Z").rank(method="ordinal").over("Vehicle_ID").alias('Stacking_Order')
+            )
+        
+        route_pandas = route_pandas.with_columns(
+            pl.col('Order_Number').cast(pl.Int64)
+        )
 
         if "Volume" in route_pandas.columns:
             route_pandas = route_pandas.drop("Volume")
