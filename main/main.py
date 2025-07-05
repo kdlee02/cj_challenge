@@ -4,7 +4,6 @@ CJ 대한통운 미래기술 챌린지
 """
 
 import json
-import pandas as pd
 import polars as pl
 import numpy as np
 import math
@@ -438,8 +437,12 @@ class Packer:
                     break
         r = [area[0][2], area[1][2], area[2][2], area[3][2]]
         result = []
-        for i in r:
-            result.append(round(i / sum(r) * 100, 2))
+        total = sum(r)
+        if total == 0:
+            result = [0, 0, 0, 0]
+        else:
+            for i in r:
+                result.append(round(i / total * 100, 2))
         return result
     def pack(self, bigger_first=False, distribute_items=True, fix_point=True, check_stable=True, support_surface_ratio=0.75, binding=[], number_of_decimals=DEFAULT_NUMBER_OF_DECIMALS):
         for bin in self.bins:
@@ -575,7 +578,6 @@ class CJOptimizer:
     
     def __init__(self):
         # 트럭 규격 (width x height x depth)
-        self.truck_dimensions = (160, 280, 180)
         self.truck_capacity = 160 * 280 * 180
         self.transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         
@@ -649,7 +651,7 @@ class CJOptimizer:
         # 5️⃣ 거리 매트릭스
         self.matrix = pl.read_csv(distance_file, separator='\t')
 
-        print(f"✅ 주문 데이터: {len(self.df)}건")
+        print(f"✅ 주문 데이터: {len(self.df) - 1}건")
         print(f"✅ 거리 매트릭스: {len(self.matrix)}건")
 
     def route_optimization(self):
@@ -674,9 +676,10 @@ class CJOptimizer:
         # PyVRP 모델 생성
         m = Model()
         m.add_vehicle_type(
-            num_available=num_vehicles + 2, 
-            capacity=int(self.truck_capacity * 0.7), 
-            fixed_cost=150000, 
+            num_available=num_vehicles + 3, 
+            capacity=int(self.truck_capacity * 0.75), 
+            #capacity=70,
+            fixed_cost=150000,
             unit_distance_cost=500
         )
         
@@ -696,6 +699,7 @@ class CJOptimizer:
                     x=coords[idx][0],
                     y=coords[idx][1],
                     delivery=row['Volume'],
+                    #delivery=1,
                     name=row['Destination']
                 )
                 self.index_to_order_number.append(row['Order_Number'])
@@ -718,8 +722,9 @@ class CJOptimizer:
                     m.add_edge(frm, to, distance=0)
         
         # 경로 최적화 실행
-        print("🔄 경로 최적화 실행 중... (최대 300초)")
-        res = m.solve(stop=MaxRuntime(300), display=False)
+        print("🔄 경로 최적화 실행 중... (최대 900초)")
+        res = m.solve(stop=MaxRuntime(60), display=True)
+
         
         # 결과 처리
         routes = [list(route) for route in res.best.routes()]
@@ -775,6 +780,8 @@ class CJOptimizer:
             new_df = pl.concat([new_df, result])
         
         self.route_df = new_df
+
+        #self.route_df.write_csv('route_df.csv')
         
     def load_optimization(self):
         """적재 최적화 수행"""
@@ -786,6 +793,7 @@ class CJOptimizer:
         vehicle_ids = self.route_df.select('Vehicle_ID').unique().to_series().to_list()
         
         for vehicle_id in vehicle_ids:
+            packer = Packer()
             if vehicle_id is None:
                 continue
                 
@@ -802,33 +810,26 @@ class CJOptimizer:
             
             # Stacking_Order는 route_order 역순으로 설정
             vehicle_items = vehicle_items.with_columns(
-                pl.int_range(vehicle_items.height, 0, -1).alias('Stacking_Order')
+                (pl.arange(0, vehicle_items.height).reverse() // 25).alias("Stacking_Order")
             )
             
             # 3D 빈 패킹 수행
-            packer = Packer()
-            
-            # 트럭 빈 생성 (width, height, depth, max_weight, max_items)
-            # 트럭 빈 생성
+
             truck = Bin(
                 partno='Truck',
-                WHD=(self.truck_dimensions[0], self.truck_dimensions[1], self.truck_dimensions[2]),
+                WHD=(160, 180, 280),
                 max_weight=999999,
-                put_type=1
+                put_type=0
             )
             packer.addBin(truck)
 
-            # 아이템 추가
+            # 1. LIFO Packing Attempt
             for row in vehicle_items.iter_rows(named=True):
                 item = Item(
                     partno=row["Box_ID"],
                     name=row["Box_ID"],
                     typeof='cube',
-                    WHD=(
-                        int(row["Box_Width"]),
-                        int(row["Box_Height"]),
-                        int(row["Box_Length"])
-                    ),
+                    WHD=(int(row["Box_Width"]), int(row["Box_Height"]), int(row["Box_Length"])),
                     weight=1,
                     level=row["Stacking_Order"],
                     updown=True,
@@ -837,24 +838,19 @@ class CJOptimizer:
                 )
                 packer.addItem(item)
 
-            # 패킹 실행
-            packer.pack(
-                fix_point=True,
-                check_stable=False,
-                bigger_first=False
-            )
-            
-            # 결과 수집
+            packer.pack(fix_point=True, check_stable=False, bigger_first=True)
+
             for item in packer.bins[0].items:
+                dim = item.getDimension()
                 all_results.append({
                     "Vehicle_ID": vehicle_id,
                     "Box_ID": item.name,
                     "Lower_Left_X": item.position[0],
-                    "Lower_Left_Y": item.position[2],  # Y와 Z 좌표 교환
+                    "Lower_Left_Y": item.position[2],  
                     "Lower_Left_Z": item.position[1],
-                    "Box_Width": item.width,
-                    "Box_Length": item.depth,
-                    "Box_Height": item.height
+                    "Box_Width": dim[0],
+                    "Box_Length": dim[2],
+                    "Box_Height": dim[1]
                 })
         
         # 적재 결과 DataFrame 생성
@@ -862,11 +858,11 @@ class CJOptimizer:
             pl.col("Lower_Left_X").cast(pl.Float64),
             pl.col("Lower_Left_Y").cast(pl.Float64),
             pl.col("Lower_Left_Z").cast(pl.Float64),
-            pl.col("Box_Width").cast(pl.Float64),
-            pl.col("Box_Length").cast(pl.Float64),
-            pl.col("Box_Height").cast(pl.Float64),
+            pl.col("Box_Width").cast(pl.Int64),
+            pl.col("Box_Length").cast(pl.Int64),
+            pl.col("Box_Height").cast(pl.Int64),
         ])
-        
+        #self.load_df.write_csv('load_df.csv')
         print(f"✅ 적재 최적화 완료 - {len(self.load_df)}개 박스 배치")
         
     def save_results(self, output_file='Result.xlsx'):
@@ -874,35 +870,34 @@ class CJOptimizer:
         print(f"\n💾 결과 저장 중: {output_file}")
         
         # 경로 최적화 결과
-        route_pandas = self.route_df
+        route_df = self.route_df
         # 적재 최적화 결과
-        load_pandas = self.load_df
+        load_df = self.load_df
+        
+        joined = route_df.join(load_df, on='Box_ID', how='left', suffix='_qwer')
+        joined = joined.drop(['Lower_Left_X','Lower_Left_Y','Lower_Left_Z','Box_Width','Box_Length','Box_Height','Vehicle_ID_qwer','Volume'])
+        joined = joined.rename({
+            'Lower_Left_X_qwer': 'Lower_Left_X',
+            'Lower_Left_Y_qwer': 'Lower_Left_Y',
+            'Lower_Left_Z_qwer': 'Lower_Left_Z',
+            'Box_Width_qwer': 'Box_Width',
+            'Box_Length_qwer': 'Box_Length',
+            'Box_Height_qwer': 'Box_Height',
+        })
+        joined = joined.with_columns(
+            pl.col("Lower_Left_Z").rank(method="ordinal").over("Vehicle_ID").alias('Stacking_Order')
+        )
+        
+        joined = joined.with_columns(
+            pl.col('Order_Number').cast(pl.Int64)
+        )
+        joined = joined.select(
+            ["Vehicle_ID","Route_Order","Destination","Order_Number","Box_ID",
+            "Stacking_Order","Lower_Left_X","Lower_Left_Y","Lower_Left_Z",
+            "Longitude","Latitude","Box_Width","Box_Length","Box_Height"]
+        )
 
-        joined = route_pandas.join(load_pandas, on='Box_ID', how='left', suffix='_qwer')
-
-        cols_to_replace = ['Lower_Left_X', 'Lower_Left_Y', 'Lower_Left_Z']
-
-        route_pandas = joined.with_columns([
-            pl.coalesce([pl.col(f"{col}_qwer"), pl.col(col)]).alias(col)
-            for col in cols_to_replace
-        ]).select([col for col in joined.columns if not col.endswith('_qwer')])
-
-        route_pandas = route_pandas.with_columns([
-            pl.when(pl.col("Destination") != "Depot")
-            .then(
-                pl.col("Route_Order")
-                .rank("dense", descending=True)
-                .over("Vehicle_ID")
-                .cast(pl.Int64) - 1
-            )
-            .otherwise(None)
-            .alias("Stacking_Order")
-        ])
-
-        if "Volume" in route_pandas.columns:
-            route_pandas = route_pandas.drop("Volume")
-
-        route_pandas.write_excel(output_file)
+        joined.write_excel(output_file)
         
         print(f"✅ 결과 저장 완료: {output_file}")
         
