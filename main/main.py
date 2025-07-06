@@ -153,66 +153,108 @@ class Bin:
         for item in self.items:
             total_weight += item.weight
         return set2Decimal(total_weight, self.number_of_decimals)
+
     def putItem(self, item, pivot, axis=None):
-        fit = False
         valid_item_position = item.position
         item.position = pivot
-        rotate = RotationType.ALL if item.updown == True else RotationType.Notupdown
-        for i in range(0, len(rotate)):
+
+        rotate = RotationType.ALL if item.updown else RotationType.Notupdown
+
+        for i in range(len(rotate)):
             item.rotation_type = i
             dimension = item.getDimension()
+
+            x, y, z = map(Decimal, pivot)
+            w, h, d = map(Decimal, dimension)
+
             if (
-                self.width < pivot[0] + dimension[0] or
-                self.height < pivot[1] + dimension[1] or
-                self.depth < pivot[2] + dimension[2]
+                x + w > Decimal(self.width) or
+                y + h > Decimal(self.height) or
+                z + d > Decimal(self.depth) or
+                x < 0 or y < 0 or z < 0
             ):
                 continue
+
             fit = True
             for current_item_in_bin in self.items:
                 if intersect(current_item_in_bin, item):
                     fit = False
                     break
-            if fit:
-                if self.getTotalWeight() + item.weight > self.max_weight:
+
+            if not fit:
+                continue
+
+            if Decimal(self.getTotalWeight()) + Decimal(item.weight) > Decimal(self.max_weight):
+                fit = False
+                continue
+
+            if self.fix_point:
+                for _ in range(3):
+                    y = Decimal(self.checkHeight([x, x + w, y, y + h, z, z + d]))
+                    x = Decimal(self.checkWidth([x, x + w, y, y + h, z, z + d]))
+                    z = Decimal(self.checkDepth([x, x + w, y, y + h, z, z + d]))
+
+                if (
+                    x < 0 or y < 0 or z < 0 or
+                    x + w > Decimal(self.width) or
+                    y + h > Decimal(self.height) or
+                    z + d > Decimal(self.depth)
+                ):
                     fit = False
-                    return fit
-                if self.fix_point == True:
-                    [w, h, d] = dimension
-                    [x, y, z] = [float(pivot[0]), float(pivot[1]), float(pivot[2])]
-                    for i in range(3):
-                        y = self.checkHeight([x, x+float(w), y, y+float(h), z, z+float(d)])
-                        x = self.checkWidth([x, x+float(w), y, y+float(h), z, z+float(d)])
-                        z = self.checkDepth([x, x+float(w), y, y+float(h), z, z+float(d)])
-                    if self.check_stable == True:
-                        item_area_lower = int(dimension[0] * dimension[1])
-                        support_area_upper = 0
-                        for i in self.fit_items:
-                            if z == i[5]:
-                                area = len(set([j for j in range(int(x), int(x+int(w)))]) & set([j for j in range(int(i[0]), int(i[1]))])) * \
-                                       len(set([j for j in range(int(y), int(y+int(h)))]) & set([j for j in range(int(i[2]), int(i[3]))]))
-                                support_area_upper += area
-                        if support_area_upper / item_area_lower < self.support_surface_ratio:
-                            four_vertices = [[x, y], [x+float(w), y], [x, y+float(h)], [x+float(w), y+float(h)]]
-                            c = [False, False, False, False]
-                            for i in self.fit_items:
-                                if z == i[5]:
-                                    for jdx, j in enumerate(four_vertices):
-                                        if (i[0] <= j[0] <= i[1]) and (i[2] <= j[1] <= i[3]):
-                                            c[jdx] = True
-                            if False in c:
-                                item.position = valid_item_position
-                                fit = False
-                                return fit
-                    self.fit_items = np.append(self.fit_items, np.array([[x, x+float(w), y, y+float(h), z, z+float(d)]]), axis=0)
-                    item.position = [set2Decimal(x), set2Decimal(y), set2Decimal(z)]
-                if fit:
-                    self.items.append(copy.deepcopy(item))
-            else:
+                    continue
+
+            self.fit_items = np.append(
+                self.fit_items,
+                np.array([[x, x + w, y, y + h, z, z + d]], dtype=object),
+                axis=0
+            )
+            item.position = [x, y, z]
+
+            self.items.append(copy.deepcopy(item))
+            return True
+
+        item.position = valid_item_position
+        return False
+
+
+    def tryFit(self, item, pivot):
+        """단순히 배치 가능성만 확인"""
+        valid_item_position = item.position
+        item.position = pivot
+
+        rotate = RotationType.ALL if item.updown else RotationType.Notupdown
+
+        for i in range(len(rotate)):
+            item.rotation_type = i
+            dimension = item.getDimension()
+
+            x, y, z = map(Decimal, pivot)
+            w, h, d = map(Decimal, dimension)
+
+            if (
+                x + w > Decimal(self.width) or
+                y + h > Decimal(self.height) or
+                z + d > Decimal(self.depth) or
+                x < 0 or y < 0 or z < 0
+            ):
+                continue
+
+            for current_item_in_bin in self.items:
+                if intersect(current_item_in_bin, item):
+                    item.position = valid_item_position
+                    return False
+
+            if Decimal(self.getTotalWeight()) + Decimal(item.weight) > Decimal(self.max_weight):
                 item.position = valid_item_position
-            return fit
-        else:
+                return False
+
             item.position = valid_item_position
-        return fit
+            return True
+
+        item.position = valid_item_position
+        return False
+
+
     def checkDepth(self, unfix_point):
         z_ = [[0, 0], [float(self.depth), float(self.depth)]]
         for j in self.fit_items:
@@ -303,11 +345,13 @@ class Packer:
     def addItem(self, item):
         self.total_items = len(self.items) + 1
         return self.items.append(item)
+
     def pack2Bin(self, bin, item, fix_point, check_stable, support_surface_ratio):
         fitted = False
         bin.fix_point = fix_point
         bin.check_stable = check_stable
         bin.support_surface_ratio = support_surface_ratio
+
         if bin.corner != 0 and not bin.items:
             corner_lst = bin.addCorner()
             for i in range(len(corner_lst)):
@@ -317,24 +361,89 @@ class Packer:
             if not response:
                 bin.unfitted_items.append(item)
             return
-        for axis in range(0, 3):
-            items_in_bin = bin.items
-            for ib in items_in_bin:
+
+        best_score = float('inf')
+        best_pivot = None
+        best_axis = None
+
+        axes_priority = [Axis.HEIGHT, Axis.DEPTH, Axis.WIDTH]
+
+        for axis in axes_priority:
+            for ib in bin.items:
                 pivot = [0, 0, 0]
                 w, h, d = ib.getDimension()
+
                 if axis == Axis.WIDTH:
                     pivot = [ib.position[0] + w, ib.position[1], ib.position[2]]
                 elif axis == Axis.HEIGHT:
                     pivot = [ib.position[0], ib.position[1] + h, ib.position[2]]
                 elif axis == Axis.DEPTH:
                     pivot = [ib.position[0], ib.position[1], ib.position[2] + d]
-                if bin.putItem(item, pivot, axis):
-                    fitted = True
-                    break
-            if fitted:
-                break
+
+                temp_item = copy.deepcopy(item)
+                if bin.tryFit(temp_item, pivot):
+                    # 강제 가장자리 우선 배치 및 극단적 LIFO 유도
+
+                    # X 방향: 가장자리에 가까울수록 score 작음
+                    x_edge_dist = min(Decimal(pivot[0]), Decimal(bin.width) - Decimal(pivot[0]))
+                    x_score = Decimal(-x_edge_dist)
+
+                    # Y 방향: LIFO 극단적 유도
+                    y_score = Decimal(pivot[1]) - Decimal(item.level) * 100
+
+                    # Z 방향: 가장자리에 가까울수록 score 작음
+                    z_edge_dist = min(Decimal(pivot[2]), Decimal(bin.depth) - Decimal(pivot[2]))
+                    z_score = Decimal(-z_edge_dist)
+
+                    score = y_score + x_score + z_score
+
+                    if score < best_score:
+                        best_score = score
+                        best_pivot = pivot
+                        best_axis = axis
+
+        if best_pivot is not None:
+            bin.putItem(item, best_pivot, best_axis)
+            fitted = True
+
         if not fitted:
             bin.unfitted_items.append(item)
+
+    def tryFit(self, item, pivot):
+        valid_item_position = item.position
+        item.position = pivot
+
+        rotate = RotationType.ALL if item.updown else RotationType.Notupdown
+
+        for i in range(len(rotate)):
+            item.rotation_type = i
+            dimension = item.getDimension()
+
+            x, y, z = map(Decimal, pivot)
+            w, h, d = map(Decimal, dimension)
+
+            if (
+                x + w > Decimal(self.width) or
+                y + h > Decimal(self.height) or
+                z + d > Decimal(self.depth) or
+                x < 0 or y < 0 or z < 0
+            ):
+                continue
+
+            for current_item_in_bin in self.items:
+                if intersect(current_item_in_bin, item):
+                    item.position = valid_item_position
+                    return False
+
+            if Decimal(self.getTotalWeight()) + Decimal(item.weight) > Decimal(self.max_weight):
+                item.position = valid_item_position
+                return False
+
+            item.position = valid_item_position
+            return True
+
+        item.position = valid_item_position
+        return False
     def sortBinding(self, bin):
         b, front, back = [], [], []
         for i in range(len(self.binding)):
@@ -437,8 +546,12 @@ class Packer:
                     break
         r = [area[0][2], area[1][2], area[2][2], area[3][2]]
         result = []
-        for i in r:
-            result.append(round(i / sum(r) * 100, 2))
+        total = sum(r)
+        if total == 0:
+            result = [0, 0, 0, 0]
+        else:
+            for i in r:
+                result.append(round(i / total * 100, 2))
         return result
     def pack(self, bigger_first=False, distribute_items=True, fix_point=True, check_stable=True, support_surface_ratio=0.75, binding=[], number_of_decimals=DEFAULT_NUMBER_OF_DECIMALS):
         for bin in self.bins:
@@ -574,7 +687,6 @@ class CJOptimizer:
     
     def __init__(self):
         # 트럭 규격 (width x height x depth)
-        self.truck_dimensions = (160, 270, 170)
         self.truck_capacity = 160 * 280 * 180
         self.transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         
@@ -674,7 +786,8 @@ class CJOptimizer:
         m = Model()
         m.add_vehicle_type(
             num_available=num_vehicles + 3, 
-            capacity=int(self.truck_capacity * 0.62), 
+            capacity=int(self.truck_capacity * 0.8), 
+            #capacity=70,
             fixed_cost=150000,
             unit_distance_cost=500
         )
@@ -695,6 +808,7 @@ class CJOptimizer:
                     x=coords[idx][0],
                     y=coords[idx][1],
                     delivery=row['Volume'],
+                    #delivery=1,
                     name=row['Destination']
                 )
                 self.index_to_order_number.append(row['Order_Number'])
@@ -718,7 +832,7 @@ class CJOptimizer:
         
         # 경로 최적화 실행
         print("🔄 경로 최적화 실행 중... (최대 900초)")
-        res = m.solve(stop=MaxRuntime(900), display=False)
+        res = m.solve(stop=MaxRuntime(60), display=True)
 
         
         # 결과 처리
@@ -775,6 +889,8 @@ class CJOptimizer:
             new_df = pl.concat([new_df, result])
         
         self.route_df = new_df
+
+        #self.route_df.write_csv('route_df.csv')
         
     def load_optimization(self):
         """적재 최적화 수행"""
@@ -786,6 +902,7 @@ class CJOptimizer:
         vehicle_ids = self.route_df.select('Vehicle_ID').unique().to_series().to_list()
         
         for vehicle_id in vehicle_ids:
+            packer = Packer()
             if vehicle_id is None:
                 continue
                 
@@ -802,33 +919,26 @@ class CJOptimizer:
             
             # Stacking_Order는 route_order 역순으로 설정
             vehicle_items = vehicle_items.with_columns(
-                pl.int_range(vehicle_items.height, 0, -1).alias('Stacking_Order')
+                (pl.arange(0, vehicle_items.height).reverse() // 35).alias("Stacking_Order")
             )
             
             # 3D 빈 패킹 수행
-            packer = Packer()
-            
-            # 트럭 빈 생성 (width, height, depth, max_weight, max_items)
-            # 트럭 빈 생성
+
             truck = Bin(
                 partno='Truck',
-                WHD=(160, 170, 270),
+                WHD=(160, 180, 280),
                 max_weight=999999,
-                put_type=1
+                put_type=0
             )
             packer.addBin(truck)
 
-            # 아이템 추가
+            # 1. LIFO Packing Attempt
             for row in vehicle_items.iter_rows(named=True):
                 item = Item(
                     partno=row["Box_ID"],
                     name=row["Box_ID"],
                     typeof='cube',
-                    WHD=(
-                        int(row["Box_Width"]),
-                        int(row["Box_Height"]),
-                        int(row["Box_Length"])
-                    ),
+                    WHD=(int(row["Box_Width"]), int(row["Box_Height"]), int(row["Box_Length"])),
                     weight=1,
                     level=row["Stacking_Order"],
                     updown=True,
@@ -837,24 +947,19 @@ class CJOptimizer:
                 )
                 packer.addItem(item)
 
-            # 패킹 실행
-            packer.pack(
-                fix_point=True,
-                check_stable=False,
-                bigger_first=False
-            )
-            
-            # 결과 수집
+            packer.pack(fix_point=True, check_stable=False, bigger_first=True)
+
             for item in packer.bins[0].items:
+                dim = item.getDimension()
                 all_results.append({
                     "Vehicle_ID": vehicle_id,
                     "Box_ID": item.name,
                     "Lower_Left_X": item.position[0],
-                    "Lower_Left_Y": item.position[2],  # Y와 Z 좌표 교환
+                    "Lower_Left_Y": item.position[2],  
                     "Lower_Left_Z": item.position[1],
-                    "Box_Width": item.width,
-                    "Box_Length": item.depth,
-                    "Box_Height": item.height
+                    "Box_Width": dim[0],
+                    "Box_Length": dim[2],
+                    "Box_Height": dim[1]
                 })
         
         # 적재 결과 DataFrame 생성
@@ -862,11 +967,11 @@ class CJOptimizer:
             pl.col("Lower_Left_X").cast(pl.Float64),
             pl.col("Lower_Left_Y").cast(pl.Float64),
             pl.col("Lower_Left_Z").cast(pl.Float64),
-            pl.col("Box_Width").cast(pl.Float64),
-            pl.col("Box_Length").cast(pl.Float64),
-            pl.col("Box_Height").cast(pl.Float64),
+            pl.col("Box_Width").cast(pl.Int64),
+            pl.col("Box_Length").cast(pl.Int64),
+            pl.col("Box_Height").cast(pl.Int64),
         ])
-        
+        #self.load_df.write_csv('load_df.csv')
         print(f"✅ 적재 최적화 완료 - {len(self.load_df)}개 박스 배치")
         
     def save_results(self, output_file='Result.xlsx'):
@@ -874,43 +979,34 @@ class CJOptimizer:
         print(f"\n💾 결과 저장 중: {output_file}")
         
         # 경로 최적화 결과
-        route_pandas = self.route_df
+        route_df = self.route_df
         # 적재 최적화 결과
-        load_pandas = self.load_df
-
-        joined = route_pandas.join(load_pandas, on='Box_ID', how='left', suffix='_qwer')
-
-        cols_to_replace = ['Lower_Left_X', 'Lower_Left_Y', 'Lower_Left_Z']
-
-        route_pandas = joined.with_columns([
-            pl.coalesce([pl.col(f"{col}_qwer"), pl.col(col)]).alias(col)
-            for col in cols_to_replace
-        ]).select([col for col in joined.columns if not col.endswith('_qwer')])
-
-        route_pandas = route_pandas.with_columns([
-            pl.when(pl.col("Destination") != "Depot")
-            .then(
-                pl.col("Route_Order")
-                .rank("dense", descending=True)
-                .over("Vehicle_ID")
-                .cast(pl.Int64) - 1
-            )
-            .otherwise(None)
-            .alias("Stacking_Order")
-        ])
-
-        route_pandas = route_pandas.with_columns(
-            pl.col("Lower_Left_Z").rank(method="ordinal").over("Vehicle_ID").alias('Stacking_Order')
-            )
+        load_df = self.load_df
         
-        route_pandas = route_pandas.with_columns(
+        joined = route_df.join(load_df, on='Box_ID', how='left', suffix='_qwer')
+        joined = joined.drop(['Lower_Left_X','Lower_Left_Y','Lower_Left_Z','Box_Width','Box_Length','Box_Height','Vehicle_ID_qwer','Volume'])
+        joined = joined.rename({
+            'Lower_Left_X_qwer': 'Lower_Left_X',
+            'Lower_Left_Y_qwer': 'Lower_Left_Y',
+            'Lower_Left_Z_qwer': 'Lower_Left_Z',
+            'Box_Width_qwer': 'Box_Width',
+            'Box_Length_qwer': 'Box_Length',
+            'Box_Height_qwer': 'Box_Height',
+        })
+        joined = joined.with_columns(
+            pl.col("Lower_Left_Z").rank(method="ordinal").over("Vehicle_ID").alias('Stacking_Order')
+        )
+        
+        joined = joined.with_columns(
             pl.col('Order_Number').cast(pl.Int64)
         )
+        joined = joined.select(
+            ["Vehicle_ID","Route_Order","Destination","Order_Number","Box_ID",
+            "Stacking_Order","Lower_Left_X","Lower_Left_Y","Lower_Left_Z",
+            "Longitude","Latitude","Box_Width","Box_Length","Box_Height"]
+        )
 
-        if "Volume" in route_pandas.columns:
-            route_pandas = route_pandas.drop("Volume")
-
-        route_pandas.write_excel(output_file)
+        joined.write_excel(output_file)
         
         print(f"✅ 결과 저장 완료: {output_file}")
         
@@ -955,7 +1051,6 @@ def main():
         distance_file=r"distance-data.txt",
         output_file=r"Result.xlsx"
     )
-
 
 if __name__ == "__main__":
     main()
