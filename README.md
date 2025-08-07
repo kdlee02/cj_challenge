@@ -53,3 +53,8 @@
 - 셔플링 비용 : 500원/셔플링
 
 Total Score= 라우팅 비용 + 하차 비용 (Total Score가 작은 팀이 우승)
+
+## Route Optimization Visualization
+![3D](./3d.png)
+## Load Optimization Visualization
+![route](./route.png)
